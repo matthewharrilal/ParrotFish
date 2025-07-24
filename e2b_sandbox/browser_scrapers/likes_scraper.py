@@ -4,7 +4,7 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-from browser_use.llm import ChatOllama
+from browser_use.llm import ChatOpenAI
 from browser_use import Agent, BrowserSession
 import asyncio
 import time
@@ -30,79 +30,217 @@ browser_settings = {
     "bypassCSP": True
 }
 
+llm = ChatOpenAI(model="gpt-4o")
+
+extraction_script = """
+(async function() {
+  // Helper: sleep for ms milliseconds
+  const sleep = ms => new Promise(res => setTimeout(res, ms));
+
+  // Helper: remove null/undefined/empty array fields
+  function cleanPost(post) {
+    return Object.fromEntries(
+      Object.entries(post).filter(
+        ([, v]) =>
+          v !== null &&
+          v !== undefined &&
+          !(Array.isArray(v) && v.length === 0)
+      )
+    );
+  }
+
+  // Helper: extract visible liked post data from all articles
+  function extractPosts() {
+    const articles = document.querySelectorAll('article');
+    const posts = [];
+    articles.forEach(article => {
+      // Author display name and username
+      let author = null, username = null;
+      // Find all anchor tags that link to a user profile
+      const userLinks = Array.from(article.querySelectorAll('a[href^="/"][role="link"]'));
+      for (const link of userLinks) {
+        const match = link.getAttribute('href').match(/^\/([^\/]+)$/);
+        if (match) {
+          username = match[1];
+          const displaySpan = link.querySelector('span');
+          if (displaySpan) {
+            author = displaySpan.textContent;
+          }
+          break;
+        }
+      }
+
+      // Date/time
+      const timeElem = article.querySelector('time');
+      const date = timeElem ? timeElem.getAttribute('datetime') : null;
+
+      // Text
+      const textElem = article.querySelector('div[data-testid="tweetText"]');
+      const text = textElem ? textElem.innerText : '';
+
+      // Permalink
+      const linkElem = timeElem ? timeElem.parentElement : null;
+      const permalink = linkElem && linkElem.getAttribute('href') ? 'https://x.com' + linkElem.getAttribute('href') : null;
+
+      // Stats
+      let likes = null, retweets = null, replies = null, views = null;
+      article.querySelectorAll('div[data-testid]').forEach(el => {
+        if (el.getAttribute('data-testid') === 'like') likes = el.innerText;
+        if (el.getAttribute('data-testid') === 'retweet') retweets = el.innerText;
+        if (el.getAttribute('data-testid') === 'reply') replies = el.innerText;
+        if (el.getAttribute('data-testid') === 'viewCount') views = el.innerText;
+      });
+
+      // Media
+      let media = [];
+      article.querySelectorAll('img, video').forEach(m => {
+        if (m.src && !m.src.includes('profile_images')) media.push(m.src);
+      });
+
+      // Quoted tweet (if present)
+      let quoted = null;
+      const quotedElem = article.querySelector('div[data-testid="tweet"] article');
+      if (quotedElem) {
+        const quotedTextElem = quotedElem.querySelector('div[data-testid="tweetText"]');
+        quoted = quotedTextElem ? quotedTextElem.innerText : null;
+      }
+
+      // Clean and push only non-null fields
+      posts.push(cleanPost({
+        author,
+        username,
+        date,
+        text,
+        permalink,
+        likes,
+        retweets,
+        replies,
+        views,
+        media,
+        quoted
+      }));
+    });
+    return posts;
+  }
+
+  // Robustly detect Likes page and username
+  const urlParts = window.location.pathname.split('/').filter(Boolean);
+  const username = urlParts[0] || 'unknown';
+  const path = window.location.pathname.toLowerCase();
+  if (!path.includes('likes')) {
+    alert('This script is intended for the Likes page only.');
+    return;
+  }
+  const pageType = 'likes';
+
+  // Get today's date in YYYY-MM-DD
+  const today = new Date();
+  const yyyy = today.getFullYear();
+  const mm = String(today.getMonth() + 1).padStart(2, '0');
+  const dd = String(today.getDate()).padStart(2, '0');
+  const dateStr = `${yyyy}-${mm}-${dd}`;
+
+  // Main: scroll and extract
+  let lastHeight = 0, sameCount = 0, maxNoChange = 15;
+  let allPosts = new Map();
+
+  while (sameCount < maxNoChange) {
+    // Extract posts
+    extractPosts().forEach(post => {
+      if (post.permalink && !allPosts.has(post.permalink)) {
+        allPosts.set(post.permalink, post);
+      }
+    });
+
+    // Scroll
+    window.scrollTo(0, document.body.scrollHeight);
+    await sleep(3500); // Wait longer for more content to load
+
+    // Check for new content
+    let newHeight = document.body.scrollHeight;
+    if (newHeight === lastHeight) {
+      sameCount++;
+    } else {
+      sameCount = 0;
+      lastHeight = newHeight;
+    }
+  }
+
+  // Output as JSON
+  const result = Array.from(allPosts.values());
+  console.log("Extracted liked posts:", result);
+
+  // Download as JSON file with dynamic name
+  const filename = `${username}_${pageType}_${dateStr}.json`;
+  const blob = new Blob([JSON.stringify(result, null, 2)], {type: 'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+})();
+"""
+
 # Build the agent's task prompt
 agent_task = f"""
-You are an expert browser automation agent. Your mission is to extract every single liked post from the user's X.com (Twitter) Likes tab, no matter how many there are, with maximal persistence, speed, and completeness. You must use the following credentials for login:
+You are an expert browser automation agent. Your mission is to log in to X.com, navigate to the user's Likes tab, and execute a JavaScript extraction script. You must use the following credentials for login:
 
 - Username: {X_USERNAME}
 - Password: {X_PASSWORD}
 
-You must handle all possible login flows, including multi-step, phone/email confirmation, 2FA, and captchas. Always use these credentials and retry login up to 2 times if needed. Never proceed until you have confirmed a successful login (e.g., by detecting the profile avatar or a unique logged-in element).
+**LOGIN ROBUSTNESS AND STREAMLINING**
+- Your first and highest priority is to log in to X.com using the provided credentials.
+- Handle all possible login flows, including:
+  - Look for the username/email/phone input field with placeholder text like "Phone, email, or username" or "Email or username"
+  - Enter the exact username "{X_USERNAME}" into this field
+  - Click "Next" or "Continue" to proceed to password entry
+  - Look for the password input field with placeholder text like "Password" or type="password"
+  - Enter the exact password "{X_PASSWORD}" into this field
+  - Multi-step login forms (e.g., username first, then password).
+  - 2FA (two-factor authentication) prompts: if prompted, log the need for 2FA and pause for user input or retry as appropriate.
+  - Captchas: if a captcha is encountered, log the event and attempt to solve if possible, otherwise log and pause.
+  - Any additional verification steps (e.g., email/phone confirmation, security questions).
+- Retry login up to 3 times if any step fails, intelligently varying the input method (username/email/phone) and handling errors.
+- Only proceed to navigation after you have confirmed a successful login by detecting a unique logged-in element (such as the profile avatar, user menu, or a personalized home page element).
+- If login fails after all retries, log a detailed error with the reason and halt further actions.
+- Log all login attempts, errors, and the final login status.
 
-**MANDATORY: AGGRESSIVE, EXHAUSTIVE, AND UNSTOPPABLE EXTRACTION**
+**NAVIGATION TO LIKES TAB**
+- After successful login, navigate to the user's profile page.
+- Click on the "Likes" tab to access the liked posts.
+- Confirm you are on the correct page (URL should contain "/likes").
+- Wait for the page to fully load before proceeding to script injection.
 
-1. **Persistence and Error Immunity**
-- Never stop for any banner, warning, or non-blocking error (e.g., "Your likes are private", "JavaScript required", missing media, rate limits, or any informational message).
-- If a single tweet cannot be read, is missing fields, or throws an error, SKIP IT and continue. Do not let a single extraction failure halt or slow the process. Log the error and move on immediately.
-- If a scroll or extraction step fails, retry up to 2 times, then continue. Never let a single failed action stop the overall process.
-- If the page displays a static or error state (e.g., JavaScript disabled), attempt to reload or re-navigate and resume extraction.
+**MANDATORY: SCRIPT INJECTION AND EXECUTION**
+- After reaching the Likes tab, you MUST execute the provided JavaScript extraction script.
+- Press F12 to open Developer Tools
+- Click on the "Console" tab
+- Paste the entire extraction script into the console
+- Press Enter to execute it
+- The script will handle all scrolling, extraction, and deduplication internally.
+- Wait for the script to finish and trigger a file download (JSON).
+- Do NOT attempt to extract data manually - only use the provided script.
 
-2. **Aggressive, Efficient Scrolling**
-- After each extraction, scroll down by a large amount (2–3 pages, or 1200–1800 pixels) to load as many new posts as possible per scroll.
-- Wait only as long as needed for new posts to appear (detect DOM changes or new <article> elements). Do not use arbitrary timeouts.
-- If no new posts appear after a scroll, retry up to 2 times, then continue.
-- Only stop if, after 3 consecutive large scrolls, no new posts are found and the DOM contains no new post containers.
+**SCRIPT CONTENT TO INJECT:**
+The following JavaScript code must be pasted into the console:
 
-3. **Batch Extraction and Deduplication**
-- After each scroll, extract all visible posts in a single batch, not one at a time.
-- Maintain a running set of unique post IDs or a hash of (author+handle+time+snippet). Before extracting, check if a post is already in your set; if so, skip it and do not infer on it again.
-- Output all extracted posts as a single deduplicated JSON array.
+{extraction_script}
 
-4. **Robust Selectors and Fallbacks**
-- Use robust, attribute-based selectors (e.g., <div role='article'>, <article>, data-testid, aria-label, etc.) to find post containers and fields (author, handle, time, snippet).
-- If a selector fails, try alternatives and log all attempts. If the DOM structure changes, adapt and log the new structure.
-- Always prefer semantic selectors and visible text over index-based selectors.
+**Error Handling and Recovery**
+- On any error (timeout, selector not found, navigation failure, script error), log the error and retry.
+- If script injection fails, try different methods to open the console.
+- Never give up on script execution - try all possible methods.
+- If persistent errors occur, attempt to reload or re-navigate and resume.
 
-5. **Data Completeness and Field Preference**
-- For each post, always expand or click any “show more” or similar button to reveal the full caption/text before extraction.
-- Extract the post URL for each liked post.
-- For the post text, always prefer the most complete field available, in this order: full_caption, caption, full_text, text, or fallback to snippet. If multiple are present, use the most complete one.
-
-6. **Speed and Efficiency**
-- Minimize delays between actions. Do not wait for unnecessary animations or timeouts.
-- Extract all visible posts in a batch after each scroll, and only run extraction if the DOM has changed or new posts are visible.
-- If the page is slow to load, retry scrolling or extraction up to 2 times, then continue.
-
-7. **Stopping Condition**
-- Only stop if, after 3 consecutive large scrolls, no new posts are found and the DOM contains no new post containers.
-- Your goal is to reach and extract ALL likes, including the very first (oldest) like. Scroll aggressively, extract in batches, and never stop for non-blocking issues.
-
-8. **Logging and Output**
-- Log only actionable events to the console: extraction success/failure, browser closure with reason, and any critical warnings or errors. Avoid noisy or verbose logs in the console.
-- Output all extracted posts as a single deduplicated JSON array with fields: author, handle, time, the most complete text field (see above), and post URL.
-- At the end, output a summary of total posts extracted, skipped, and any critical issues encountered.
-- Save a detailed log file with all steps, selectors, errors, and summary statistics, but keep console output minimal.
-
-9. **Error Handling and Recovery**
-- On any error (timeout, selector not found, navigation failure), log the error, save a screenshot and HTML if possible, and continue.
-- If persistent errors occur, attempt to reload or re-navigate and resume extraction.
-- Never let a single error, missing field, or failed extraction stop or slow the overall process.
-- Log browser closure reasons and handle infrastructure timeouts gracefully.
-
-10. **Session & Output Management**
-- Before each run, clear the output directory where extracted posts are stored.
-- Aggregate all extracted posts into a single JSON file at the end of the run.
-- Ensure all outputs are stored in a git-ignored directory.
-
-11. **General Principles**
-- Be maximally persistent, aggressive, and exhaustive. Only stop when you are certain there are no more posts to extract.
-- Never stop for a single tweet, error, or warning. Always continue, retry, and recover.
-- Your mission is to extract every possible liked post, as quickly and completely as possible, regardless of minor issues.
+**General Principles**
+- Be maximally persistent and aggressive about script execution.
+- Your mission is to get the extraction script running no matter what.
+- Do not stop until the script has been successfully injected and executed.
+- Use any means necessary to get the script into the browser console.
 
 **You are to embody all of these principles and strategies in your actions.**
 """
-
-llm = ChatOllama(model="mistral:7b-instruct")
 
 async def main():
     async with BrowserSession(browser_settings=browser_settings) as session:
@@ -111,8 +249,14 @@ async def main():
             llm=llm,
             browser=session
         )
+        
+        print("Starting agent to handle login, navigation, and script injection...")
         result = await agent.run()
-        print("Agent result joe rogan:", result)
+        print("Agent completed. Result:", result)
+        
+        # Wait for any file downloads to complete
+        print("Waiting for extraction to complete...")
+        await asyncio.sleep(10)
 
 if __name__ == "__main__":
     import asyncio
