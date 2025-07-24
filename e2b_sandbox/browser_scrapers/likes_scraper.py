@@ -4,7 +4,7 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-from browser_use.llm import ChatOpenAI
+from browser_use.llm import ChatOllama
 from browser_use import Agent, BrowserSession
 import asyncio
 import time
@@ -63,27 +63,38 @@ You must handle all possible login flows, including multi-step, phone/email conf
 - If a selector fails, try alternatives and log all attempts. If the DOM structure changes, adapt and log the new structure.
 - Always prefer semantic selectors and visible text over index-based selectors.
 
-5. **Speed and Efficiency**
+5. **Data Completeness and Field Preference**
+- For each post, always expand or click any “show more” or similar button to reveal the full caption/text before extraction.
+- Extract the post URL for each liked post.
+- For the post text, always prefer the most complete field available, in this order: full_caption, caption, full_text, text, or fallback to snippet. If multiple are present, use the most complete one.
+
+6. **Speed and Efficiency**
 - Minimize delays between actions. Do not wait for unnecessary animations or timeouts.
 - Extract all visible posts in a batch after each scroll, and only run extraction if the DOM has changed or new posts are visible.
 - If the page is slow to load, retry scrolling or extraction up to 2 times, then continue.
 
-6. **Stopping Condition**
+7. **Stopping Condition**
 - Only stop if, after 3 consecutive large scrolls, no new posts are found and the DOM contains no new post containers.
 - Your goal is to reach and extract ALL likes, including the very first (oldest) like. Scroll aggressively, extract in batches, and never stop for non-blocking issues.
 
-7. **Logging and Output**
-- Log every scroll, extraction, skipped post, selector used, and error encountered, but never let a single error halt the process.
-- Output all extracted posts as a single deduplicated JSON array with fields: author, handle, time, snippet.
-- Log the number of unique posts after each scroll, and the selectors used.
-- Save a detailed log file with all steps, selectors, errors, and summary statistics.
+8. **Logging and Output**
+- Log only actionable events to the console: extraction success/failure, browser closure with reason, and any critical warnings or errors. Avoid noisy or verbose logs in the console.
+- Output all extracted posts as a single deduplicated JSON array with fields: author, handle, time, the most complete text field (see above), and post URL.
+- At the end, output a summary of total posts extracted, skipped, and any critical issues encountered.
+- Save a detailed log file with all steps, selectors, errors, and summary statistics, but keep console output minimal.
 
-8. **Error Handling and Recovery**
+9. **Error Handling and Recovery**
 - On any error (timeout, selector not found, navigation failure), log the error, save a screenshot and HTML if possible, and continue.
 - If persistent errors occur, attempt to reload or re-navigate and resume extraction.
 - Never let a single error, missing field, or failed extraction stop or slow the overall process.
+- Log browser closure reasons and handle infrastructure timeouts gracefully.
 
-9. **General Principles**
+10. **Session & Output Management**
+- Before each run, clear the output directory where extracted posts are stored.
+- Aggregate all extracted posts into a single JSON file at the end of the run.
+- Ensure all outputs are stored in a git-ignored directory.
+
+11. **General Principles**
 - Be maximally persistent, aggressive, and exhaustive. Only stop when you are certain there are no more posts to extract.
 - Never stop for a single tweet, error, or warning. Always continue, retry, and recover.
 - Your mission is to extract every possible liked post, as quickly and completely as possible, regardless of minor issues.
@@ -91,7 +102,7 @@ You must handle all possible login flows, including multi-step, phone/email conf
 **You are to embody all of these principles and strategies in your actions.**
 """
 
-llm = ChatOpenAI(model="gpt-4o")
+llm = ChatOllama(model="mistral:7b-instruct")
 
 async def main():
     async with BrowserSession(browser_settings=browser_settings) as session:
