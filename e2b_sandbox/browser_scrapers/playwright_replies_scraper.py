@@ -600,8 +600,8 @@ class PlaywrightRepliesScraper:
             "warnings": results.get('warnings', []),
             "totalPosts": results.get('totalPosts', len(results.get('posts', [])))
         }
-        # Omit nulls from posts and metadata
-        output = omit_nulls({ **scrape_metadata, "posts": results['posts'] })
+        # Save results directly, nulls already omitted in JS
+        output = { **scrape_metadata, "posts": results['posts'] }
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(output, f, indent=2, ensure_ascii=False)
         print(f"Results saved to: {filepath}")
